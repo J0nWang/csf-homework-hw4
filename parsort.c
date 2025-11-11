@@ -14,6 +14,29 @@ unsigned long partition( int64_t *arr, unsigned long start, unsigned long end );
 int quicksort( int64_t *arr, unsigned long start, unsigned long end, unsigned long par_threshold );
 
 // TODO: declare additional helper functions if needed
+static int waitChildStrict( pid_t childPid )
+{
+  int wstatus;
+  pid_t rc = waitpid(childPid, &wstatus, 0);
+
+  if ( rc < 0 ) {
+    // waitpid failed
+    fprintf(stderr, "waitpid failed\n");
+    return 0;
+  } else {
+    // check status of child
+    if ( !WIFEXITED( wstatus ) ) {
+      // child did not exit normally (e.g., it was terminated by a signal)
+      fprintf(stderr, "child was not exited normally (e.g terminated by a signal)\n");
+      return 0;
+    } else if ( WEXITSTATUS( wstatus ) != 0 ) {
+      // child exited with a non-zero exit code
+      fprintf(stderr, "child exited with a non-zero exit code\n");
+      return 0;
+    } else 
+    return 1;
+  }
+}
 
 int main( int argc, char **argv ) {
   unsigned long par_threshold;
@@ -26,14 +49,45 @@ int main( int argc, char **argv ) {
 
   // open the named file
   // TODO: open the named file
+  fd = open(argv[1], O_RDWR);
+  if (fd < 0) {
+    fprintf(stderr, "Error: file couldn't be opened\n");
+    exit(1);
+    // file couldn't be opened: handle error and exit
+  }
 
   // determine file size and number of elements
   unsigned long file_size, num_elements;
   // TODO: determine the file size and number of elements
+  struct stat statbuf;
+  int rc = fstat( fd, &statbuf );
+  if ( rc != 0 ) {
+    // handle fstat error and exit
+    fprintf(stderr, "fstat error occured.\n");
+    close(fd);
+    exit(1);
+  }
+  // statbuf.st_size indicates the number of bytes in the file
+  file_size = (unsigned long)statbuf.st_size;
 
+  if ((statbuf.st_size % (long)sizeof(int64_t)) != 0) {
+    fprintf(stderr, "Error: file size is not a multiple of 8 bytes\n");
+    close(fd);
+    exit(1);
+  }
+  num_elements = (unsigned long)(statbuf.st_size / (long)sizeof(int64_t));
+  
   // mmap the file data
   int64_t *arr;
   // TODO: mmap the file data
+  arr = mmap( NULL, file_size, PROT_READ | PROT_WRITE,
+            MAP_SHARED, fd, 0 );
+  close( fd ); // file can be closed now
+  if ( arr == MAP_FAILED ) {
+    // handle mmap error and exit
+    fprintf(stderr, "mmap error occurred.\n");
+    exit(1);
+  }
 
   // Sort the data!
   int success;
@@ -45,7 +99,10 @@ int main( int argc, char **argv ) {
 
   // Unmap the file data
   // TODO: unmap the file data
-
+  if (munmap( arr, file_size ) < 0) { 
+    fprintf(stderr, "munmap error occurred.\n");
+    exit(1);
+  }
   return 0;
 }
 
@@ -178,8 +235,36 @@ int quicksort( int64_t *arr, unsigned long start, unsigned long end, unsigned lo
   // Recursively sort the left and right partitions
   int left_success, right_success;
   // TODO: modify this code so that the recursive calls execute in child processes
-  left_success = quicksort( arr, start, mid, par_threshold );
-  right_success = quicksort( arr, mid + 1, end, par_threshold );
+
+  pid_t leftPid = fork();
+  if ( leftPid == 0 ) {
+    int ok = quicksort( arr, start, mid, par_threshold );
+    if ( ok )
+      exit( 0 );
+    else
+      exit( 1 );
+  } else if ( leftPid < 0 ) {
+    fprintf( stderr, "fork (left) failed\n" );
+    return 0;
+  }
+
+  pid_t rightPid = fork();
+  if ( rightPid == 0 ) {
+    int ok = quicksort( arr, mid + 1, end, par_threshold );
+    if ( ok )
+      exit( 0 );
+    else
+      exit( 1 );
+  } else if ( rightPid < 0 ) {
+    fprintf( stderr, "fork (right) failed\n" );
+    // make sure to clean up left child even on error
+    int leftOk = waitChildStrict(leftPid);
+    (void)leftOk;
+    return 0;
+  }
+
+  left_success = waitChildStrict(leftPid);
+  right_success = waitChildStrict(rightPid);
 
   return left_success && right_success;
 }
